@@ -1,32 +1,88 @@
-# Conway's Game of Life in Python ![Tests](https://github.com/domoritz/gameoflife-python/workflows/Tests/badge.svg)
+# Bio-Inspired Game of Life
 
-Implementation of [Conway's Game of Life](https://en.wikipedia.org/wiki/Conway's_Game_of_Life) in an infinite space in Python. Alive cells are stored in a set. To calculate the next iteration, we compute the number of neighbors for each cell that has neighbors.
+**Module:** COMP5400M Bio-Inspired Computing  
+**Assessment:** Coursework 2  
 
-Peter Norvig has a fantastic explanation in a [Jupyter Notebook](https://nbviewer.jupyter.org/url/norvig.com/ipython/Life.ipynb).
+## Overview
+This project implements a neuroevolutionary framework using **Compositional Pattern Producing Networks (CPPNs)** to generate and evolve optimal initial seed states for Conway's Game of Life. The goal of the algorithm is to discover seed patterns that yield sustained survival, structural complexity, movement (center of mass displacement), and dynamic behaviors over time.
 
-My goal was to write a pythonic program that is easy to understand (limit the use of comprehensions).
+By utilizing spatial features (radial distance, border distance, trigonometric properties) as inputs to a neural network, the system outputs structured boolean starting grids rather than purely random noise. The fitness function evaluates the subsequent Game of Life simulation across hundreds of steps to score the network's "creativity."
 
-I am implementing the Game of Life in different programming languages to learn about them. You can find [all of my implementations on GitHub](https://github.com/domoritz?tab=repositories&q=gameoflife).
+---
 
+## File Structure
 
-## What I liked/disliked about python
+- **`train.py`**  
+  The main engine for the neuroevolutionary process. It manages a population of CPPNs (genomes), simulates the Game of Life using hardware-accelerated PyTorch convolutions, evaluates population fitness based on spatial and temporal metrics, and performs crossover/mutation to generate successive generations.
+  
+- **`evaluate.py`**  
+  The visual evaluation and comparison tool. It loads a specified saved checkpoint and visually contrasts the trained agent's generated grid against a completely random untrained agent. It uses `pygame` to render the Game of Life steps in real-time.
 
-* Python syntax is easy to read and write.
-* Named tuples, iterators, defaultdict, and list comprehensions are awesome.
-* Writing tests is really easy.
+- **`requirements.txt`**  
+  The list of required Python dependencies needed to run the project.
 
+- **`Runs/`**  
+  A directory generated automatically during training. Each training session produces a timestamped `run_<timestamp>` folder containing:
+  - `checkpoint.json`: Contains the highest performing genome, population data, and hyperparameters.
+  - `fitness_log.json`: The training trajectory over generations (best, mean, worst fitness).
 
-## Run an example
+---
 
-```sh
-python game_of_life.py
+## Installation & Requirements
+
+Ensure you have Python 3.9+ installed. It is recommended to use a virtual environment.
+
+1. **Install Dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+---
+
+## Usage Instructions
+
+### 1. Training the Model (`train.py`)
+To begin an evolutionary training run, execute the `train.py` script. The script relies on an evolutionary algorithm to iteratively improve the generators.
+
+**Basic Usage:**
+```bash
+python train.py
 ```
 
+**Advanced Usage / Arguments:**
+You can customize the evolutionary hyperparameters via command-line arguments:
+- `--max_generations [INT]`: Maximum generations to evolve (default: 10000).
+- `--population [INT]`: Number of genomes in the population (default: 36).
+- `--save_every [INT]`: Frequency (in generations) to dump a checkpoint (default: 50).
+- `--resume [PATH]`: Path to an existing `checkpoint.json` file to continue training.
+- `--compile`: Enables PyTorch `torch.compile()` for potentially faster tensor operations (requires PyTorch 2.0+).
 
-## Running the tests
+*Example:*
+```bash
+python train.py --population 50 --max_generations 5000 --compile
+```
 
-Run `python test.py`.
+Outputs will be logged locally to the console, and checkpoints will be saved iteratively to the `Runs/run_<timestamp>/` directory.
 
-## More
+### 2. Evaluating a Trained Model (`evaluate.py`)
+To see the results of your training, use the evaluation script. It displays a Pygame window showing the Game of Life initialized by your evolved generator on the left, and a random generator on the right.
 
-Check out this sonification of the output of this program: https://github.com/Mystified131/GameOfMusic. 
+**Basic Usage:**
+```bash
+python evaluate.py --checkpoint "Runs/run_16/checkpoint.json"
+```
+
+**Controls inside the simulation:**
+- **Spacebar**: Pause or Resume the simulation.
+- **R**: Reset the grid back to step 0.
+
+*(If you omit the `--checkpoint` argument, it will default to a pre-set checkpoint path. Ensure the provided path accurately targets the `.json` checkpoint you wish to evaluate).*
+
+---
+
+## Key Metrics Evaluated
+The fitness function within `train.py` is multi-objective, applying rewards and penalties based on:
+- **Longevity:** How many simulation steps the generated cells survive.
+- **Movement (CoM Travel):** Total displacement of the cellular pattern's center of mass.
+- **Dynamic Activity:** Sustained changes across Early, Mid, and Late stages of the simulation.
+- **Compressibility / Novelty:** Penalties for patterns that quickly fall into simple, short repeating static loops (stasis/periodicity penalties).
