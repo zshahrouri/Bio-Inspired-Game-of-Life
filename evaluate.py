@@ -1,6 +1,15 @@
+"""
+game_of_life_evo.py
+
+Visualises and evaluates evolved Compositional Pattern Producing Networks (CPPNs)
+acting as seed generators for Conway's Game of Life. 
+Displays a side-by-side comparison between a trained generator and a random one.
+"""
+
 import json
 import math
 import sys
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,23 +40,34 @@ GRID_PIXELS_H = GRID_H * CELL_SIZE
 WINDOW_W = (GRID_PIXELS_W * 2) + (MARGIN * 3)
 WINDOW_H = GRID_PIXELS_H + HEADER_H + MARGIN
 
-if torch.cuda.is_available(): DEVICE = torch.device("cuda")
-elif torch.backends.mps.is_available(): DEVICE = torch.device("mps")
-else: DEVICE = torch.device("cpu")
+if torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+elif torch.backends.mps.is_available():
+    DEVICE = torch.device("mps")
+else:
+    DEVICE = torch.device("cpu")
+
 
 @dataclass
 class Genome:
-    w1: np.ndarray; b1: np.ndarray
-    w2: np.ndarray; b2: np.ndarray
-    w3: np.ndarray; b3: np.ndarray
+    w1: np.ndarray
+    b1: np.ndarray
+    w2: np.ndarray
+    b2: np.ndarray
+    w3: np.ndarray
+    b3: np.ndarray
 
     @staticmethod
     def from_dict(data: dict) -> "Genome":
         return Genome(
-            np.array(data["w1"], dtype=np.float32), np.array(data["b1"], dtype=np.float32),
-            np.array(data["w2"], dtype=np.float32), np.array(data["b2"], dtype=np.float32),
-            np.array(data["w3"], dtype=np.float32), np.array(data["b3"], dtype=np.float32),
+            np.array(data["w1"], dtype=np.float32),
+            np.array(data["b1"], dtype=np.float32),
+            np.array(data["w2"], dtype=np.float32),
+            np.array(data["b2"], dtype=np.float32),
+            np.array(data["w3"], dtype=np.float32),
+            np.array(data["b3"], dtype=np.float32),
         )
+
 
 def get_random_genome() -> Genome:
     """Generates a completely untrained network."""
@@ -61,7 +81,15 @@ def get_random_genome() -> Genome:
         rng.normal(0.0, 0.2, (1,)).astype(np.float32),
     )
 
+
 def get_features() -> torch.Tensor:
+    """
+    Generates a set of spatial features (coordinates, radial distance, sine/cosine waves, 
+    and border distance) for the CPPN to use as input to generate the seed grid.
+    
+    Returns:
+        torch.Tensor: Feature tensor of shape [2, H*W, INPUTS]
+    """
     ys, xs = np.mgrid[0:GRID_H, 0:GRID_W]
 
     xn = (xs / max(1, GRID_W - 1)) * 2.0 - 1.0
@@ -71,32 +99,48 @@ def get_features() -> torch.Tensor:
     radial_centred = radial - radial.mean()
     radial_norm = radial_centred / (radial_centred.std() + 1e-8)
 
-    border_dist = np.minimum.reduce([
-        xs / max(1, GRID_W - 1),
-        ys / max(1, GRID_H - 1),
-        (GRID_W - 1 - xs) / max(1, GRID_W - 1),
-        (GRID_H - 1 - ys) / max(1, GRID_H - 1)
-    ])
+    border_dist = np.minimum.reduce(
+        [
+            xs / max(1, GRID_W - 1),
+            ys / max(1, GRID_H - 1),
+            (GRID_W - 1 - xs) / max(1, GRID_W - 1),
+            (GRID_H - 1 - ys) / max(1, GRID_H - 1),
+        ]
+    )
     border_dist = border_dist * 2.0 - 1.0
 
-    feats = np.stack([
-        xn,
-        yn,
-        radial_norm,
-        np.sin(3.0 * math.pi * xn),
-        np.cos(3.0 * math.pi * yn),
-        np.sin(3.0 * math.pi * yn),
-        np.cos(3.0 * math.pi * xn),
-        border_dist,
-        np.ones_like(xn)
-    ], axis=-1)
+    feats = np.stack(
+        [
+            xn,
+            yn,
+            radial_norm,
+            np.sin(3.0 * math.pi * xn),
+            np.cos(3.0 * math.pi * yn),
+            np.sin(3.0 * math.pi * yn),
+            np.cos(3.0 * math.pi * xn),
+            border_dist,
+            np.ones_like(xn),
+        ],
+        axis=-1,
+    )
 
     feats = feats.reshape(-1, INPUTS).astype(np.float32)
     return torch.tensor(feats, device=DEVICE).unsqueeze(0).expand(2, -1, -1)
 
+
 @torch.no_grad()
 def evaluate_genomes(trained: Genome, random: Genome) -> torch.Tensor:
-    """Runs the CPPN for both genomes to get the starting seed grids."""
+    """
+    Runs the CPPN models for both the trained and random genomes to generate 
+    the starting boolean seed grids for the Game of Life.
+    
+    Args:
+        trained (Genome): The trained network weights and biases.
+        random (Genome): Randomly initialized network weights and biases.
+        
+    Returns:
+        torch.Tensor: Boolean grid seeds of shape [2, 1, GRID_H, GRID_W].
+    """
     population = [trained, random]
     print("trained w1 shape:", trained.w1.shape)
     print("random w1 shape:", random.w1.shape)
@@ -118,34 +162,79 @@ def evaluate_genomes(trained: Genome, random: Genome) -> torch.Tensor:
 
 @torch.no_grad()
 def step_gol(grids: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+    """
+    Advances the Game of Life grids by one step using a 2D convolution.
+    Applies toroidal (wrap-around) boundary conditions.
+    
+    Args:
+        grids (torch.Tensor): Current state of the grids, shape [2, 1, GRID_H, GRID_W].
+        kernel (torch.Tensor): Convolution kernel for counting neighbors.
+        
+    Returns:
+        torch.Tensor: The updated grids for the next time step.
+    """
     grids_padded = torch.cat([grids[:, :, -1:, :], grids, grids[:, :, :1, :]], dim=2)
-    grids_padded = torch.cat([grids_padded[:, :, :, -1:], grids_padded, grids_padded[:, :, :, :1]], dim=3)
+    grids_padded = torch.cat(
+        [grids_padded[:, :, :, -1:], grids_padded, grids_padded[:, :, :, :1]], dim=3
+    )
 
     neighbors = torch.round(F.conv2d(grids_padded, kernel, padding=0))
 
-    nxt_grids = (
-        ((grids > 0.5) & ((neighbors == 2.0) | (neighbors == 3.0))) |
-        ((grids < 0.5) & (neighbors == 3.0))
+    nxt_grids = ((grids > 0.5) & ((neighbors == 2.0) | (neighbors == 3.0))) | (
+        (grids < 0.5) & (neighbors == 3.0)
     )
 
     return nxt_grids.to(torch.float32)
 
+
 def draw_grid(surface, np_grid, x_offset, y_offset):
-    """Draws a single grid."""
-    # Draw Background
-    pygame.draw.rect(surface, DARK_GRAY, (x_offset-1, y_offset-1, GRID_PIXELS_W+2, GRID_PIXELS_H+2), 1)
-    pygame.draw.rect(surface, BLACK, (x_offset, y_offset, GRID_PIXELS_W, GRID_PIXELS_H))
+    """
+    Draws a single Game of Life grid onto a Pygame surface.
     
+    Args:
+        surface (pygame.Surface): The Pygame screen surface.
+        np_grid (np.ndarray): 2D numpy array representing the grid state.
+        x_offset (int): X coordinate to start drawing.
+        y_offset (int): Y coordinate to start drawing.
+    """
+    # Draw Background
+    pygame.draw.rect(
+        surface,
+        DARK_GRAY,
+        (x_offset - 1, y_offset - 1, GRID_PIXELS_W + 2, GRID_PIXELS_H + 2),
+        1,
+    )
+    pygame.draw.rect(surface, BLACK, (x_offset, y_offset, GRID_PIXELS_W, GRID_PIXELS_H))
+
     # Draw Cells
     # np_grid shape is (H, W)
     for y in range(GRID_H):
         for x in range(GRID_W):
             if np_grid[y, x] > 0.5:
-                rect = (x_offset + x * CELL_SIZE, y_offset + y * CELL_SIZE, CELL_SIZE, CELL_SIZE)
+                rect = (
+                    x_offset + x * CELL_SIZE,
+                    y_offset + y * CELL_SIZE,
+                    CELL_SIZE,
+                    CELL_SIZE,
+                )
                 pygame.draw.rect(surface, NEON_GREEN, rect)
 
+
 def main():
-    checkpoint_file = Path("Runs/run_16/checkpoint.json")
+    """
+    Main entry point. Loads the trained checkpoint and runs the visual simulation
+    comparing the trained agent to a randomly initialized agent.
+    """
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default="Runs/run_16/checkpoint.json",
+        help="Path to the checkpoint file",
+    )
+    args = parser.parse_args()
+
+    checkpoint_file = Path(args.checkpoint)
     if not checkpoint_file.exists():
         print(f"Error: {checkpoint_file} not found. Run the training script first!")
         sys.exit(1)
@@ -167,7 +256,9 @@ def main():
     font_small = pygame.font.SysFont(None, 32)
 
     # Pre-allocate Convolution Kernel
-    kernel = torch.tensor([[[[1, 1, 1], [1, 0, 1], [1, 1, 1]]]], dtype=torch.float32, device=DEVICE)
+    kernel = torch.tensor(
+        [[[[1, 1, 1], [1, 0, 1], [1, 1, 1]]]], dtype=torch.float32, device=DEVICE
+    )
 
     # Initial seeds
     base_grids = evaluate_genomes(trained_genome, random_genome)
@@ -192,24 +283,32 @@ def main():
         screen.fill(BLACK)
 
         # Draw UI text
-        title = font_large.render(f"Evolved Generator (Gen {gen})   vs   Random Generator", True, TEXT_COLOR)
-        screen.blit(title, (WINDOW_W//2 - title.get_width()//2, 15))
+        title = font_large.render(
+            f"Evolved Generator (Gen {gen})   vs   Random Generator", True, TEXT_COLOR
+        )
+        screen.blit(title, (WINDOW_W // 2 - title.get_width() // 2, 15))
 
-        lbl_trained = font_small.render(f"Trained Agent (Fitness: {trained_fitness:.2f})", True, NEON_GREEN)
+        lbl_trained = font_small.render(
+            f"Trained Agent (Fitness: {trained_fitness:.2f})", True, NEON_GREEN
+        )
         screen.blit(lbl_trained, (MARGIN, 60))
 
         lbl_random = font_small.render("Untrained Random Agent", True, TEXT_COLOR)
         screen.blit(lbl_random, (MARGIN * 2 + GRID_PIXELS_W, 60))
-        
-        lbl_step = font_small.render(f"Step: {step} / {EVAL_STEPS} (Space: Pause, R: Reset)", True, TEXT_COLOR)
-        screen.blit(lbl_step, (WINDOW_W//2 - lbl_step.get_width()//2, WINDOW_H - 30))
+
+        lbl_step = font_small.render(
+            f"Step: {step} / {EVAL_STEPS} (Space: Pause, R: Reset)", True, TEXT_COLOR
+        )
+        screen.blit(
+            lbl_step, (WINDOW_W // 2 - lbl_step.get_width() // 2, WINDOW_H - 30)
+        )
 
         # Convert tensors to CPU numpy arrays for rendering
         np_grids = current_grids.squeeze(1).cpu().numpy()
 
         # Draw left grid (Trained)
         draw_grid(screen, np_grids[0], MARGIN, HEADER_H)
-        
+
         # Draw right grid (Random)
         draw_grid(screen, np_grids[1], MARGIN * 2 + GRID_PIXELS_W, HEADER_H)
 
@@ -230,6 +329,6 @@ def main():
 
     pygame.quit()
 
+
 if __name__ == "__main__":
     main()
-
